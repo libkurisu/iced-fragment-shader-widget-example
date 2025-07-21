@@ -1,12 +1,9 @@
 use glam::Vec2;
-use iced::advanced::Shell;
-use iced::event::Status;
-use iced::mouse;
 use iced::mouse::Cursor;
-use iced::widget::shader::wgpu;
-use iced::widget::shader::Event;
-use iced::widget::{column, row, shader, slider, text};
-use iced::{Alignment, Element, Length, Rectangle, Sandbox, Settings, Size};
+use iced::wgpu;
+use iced::widget::{column, row, shader, slider, text, Action};
+use iced::{mouse, Event};
+use iced::{Alignment, Element, Length, Rectangle};
 
 const ZOOM_MIN: f32 = 1.0;
 const ZOOM_DEFAULT: f32 = 2.0;
@@ -50,22 +47,25 @@ impl FragmentShaderPipeline {
             layout: None,
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
+                compilation_options: Default::default(),
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: Default::default(),
             }),
             multiview: None,
+            cache: None,
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -169,13 +169,12 @@ impl FragmentShaderPrimitive {
 impl shader::Primitive for FragmentShaderPrimitive {
     fn prepare(
         &self,
-        format: wgpu::TextureFormat,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        _bounds: Rectangle,
-        target_size: Size<u32>,
-        _scale_factor: f32,
+        format: wgpu::TextureFormat,
         storage: &mut shader::Storage,
+        bounds: &Rectangle,
+        viewport: &shader::Viewport,
     ) {
         if !storage.has::<FragmentShaderPipeline>() {
             storage.store(FragmentShaderPipeline::new(device, format));
@@ -186,7 +185,7 @@ impl shader::Primitive for FragmentShaderPrimitive {
         pipeline.update(
             queue,
             &Uniforms {
-                resolution: Vec2::new(target_size.width as f32, target_size.height as f32),
+                resolution: Vec2::new(bounds.width as f32, bounds.height as f32),
                 center: self.controls.center,
                 scale: self.controls.scale(),
                 max_iter: self.controls.max_iter,
@@ -196,14 +195,13 @@ impl shader::Primitive for FragmentShaderPrimitive {
 
     fn render(
         &self,
+        encoder: &mut wgpu::CommandEncoder,
         storage: &shader::Storage,
         target: &wgpu::TextureView,
-        _target_size: Size<u32>,
-        viewport: Rectangle<u32>,
-        encoder: &mut wgpu::CommandEncoder,
+        clip_bounds: &Rectangle<u32>,
     ) {
         let pipeline = storage.get::<FragmentShaderPipeline>().unwrap();
-        pipeline.render(target, encoder, viewport);
+        pipeline.render(target, encoder, *clip_bounds);
     }
 }
 
@@ -254,11 +252,10 @@ impl shader::Program<Message> for FragmentShaderProgram {
     fn update(
         &self,
         state: &mut Self::State,
-        event: Event,
+        event: &Event,
         bounds: Rectangle,
         cursor: Cursor,
-        _shell: &mut Shell<'_, Message>,
-    ) -> (Status, Option<Message>) {
+    ) -> Option<iced::widget::Action<Message>> {
         if let Event::Mouse(mouse::Event::WheelScrolled { delta }) = event {
             if let Some(pos) = cursor.position_in(bounds) {
                 let pos = Vec2::new(pos.x, pos.y);
@@ -266,10 +263,7 @@ impl shader::Program<Message> for FragmentShaderProgram {
                     mouse::ScrollDelta::Lines { x: _, y } => y,
                     mouse::ScrollDelta::Pixels { x: _, y } => y,
                 };
-                return (
-                    Status::Captured,
-                    Some(Message::ZoomDelta(pos, bounds, delta)),
-                );
+                return Some(Action::publish(Message::ZoomDelta(pos, bounds, *delta)));
             }
         }
 
@@ -278,7 +272,7 @@ impl shader::Program<Message> for FragmentShaderProgram {
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                     if let Some(pos) = cursor.position_over(bounds) {
                         *state = MouseInteraction::Panning(Vec2::new(pos.x, pos.y));
-                        return (Status::Captured, None);
+                        return Some(Action::capture());
                     }
                 }
                 _ => {}
@@ -291,13 +285,13 @@ impl shader::Program<Message> for FragmentShaderProgram {
                     let pos = Vec2::new(position.x, position.y);
                     let delta = pos - *prev_pos;
                     *state = MouseInteraction::Panning(pos);
-                    return (Status::Captured, Some(Message::PanningDelta(delta)));
+                    return Some(Action::publish(Message::PanningDelta(delta)));
                 }
                 _ => {}
             },
         };
 
-        (Status::Ignored, None)
+        None
     }
 }
 
@@ -312,19 +306,12 @@ fn control<'a>(
     row![text(label), control.into()].spacing(10).into()
 }
 
-impl Sandbox for FragmentShaderApp {
-    type Message = Message;
-
+impl FragmentShaderApp {
     fn new() -> Self {
         Self {
             program: FragmentShaderProgram::new(),
         }
     }
-
-    fn title(&self) -> String {
-        String::from("Fragment Shader Widget - Iced")
-    }
-
     fn view(&self) -> Element<'_, Message> {
         let controls = row![
             control(
@@ -353,7 +340,7 @@ impl Sandbox for FragmentShaderApp {
             .height(Length::Fill);
 
         column![shader, controls]
-            .align_items(Alignment::Center)
+            .align_x(Alignment::Center)
             .padding(10)
             .spacing(10)
             .width(Length::Fill)
@@ -387,5 +374,10 @@ impl Sandbox for FragmentShaderApp {
 }
 
 fn main() -> iced::Result {
-    FragmentShaderApp::run(Settings::default())
+    iced::application(
+        FragmentShaderApp::new,
+        FragmentShaderApp::update,
+        FragmentShaderApp::view,
+    )
+    .run()
 }
